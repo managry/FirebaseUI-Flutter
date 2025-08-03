@@ -2,10 +2,11 @@
 // for details. All rights reserved. Use of this source code is governed by a
 // BSD-style license that can be found in the LICENSE file.
 
-import 'package:firebase_auth/firebase_auth.dart' as fba;
-import 'package:app_links/app_links.dart';
-import 'package:flutter/material.dart';
 import 'dart:async';
+
+import 'package:app_links/app_links.dart';
+import 'package:firebase_auth/firebase_auth.dart' as fba;
+import 'package:flutter/material.dart';
 
 /// All possible states of the email verification process.
 enum EmailVerificationState {
@@ -47,8 +48,8 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
   StreamSubscription<Uri>? _linkSubscription;
 
   EmailVerificationController(this.auth, {AppLinks? appLinks})
-      : _appLinks = appLinks ?? AppLinks(),
-        super(EmailVerificationState.unresolved) {
+    : _appLinks = appLinks ?? AppLinks(),
+      super(EmailVerificationState.unresolved) {
     final user = auth.currentUser;
 
     if (user != null) {
@@ -66,6 +67,7 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
   void dispose() {
     _linkSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _disposed = true;
     super.dispose();
   }
 
@@ -85,6 +87,11 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
   /// Contains an [Exception] if [state] is [EmailVerificationState.failed].
   Exception? error;
 
+  /// Controller might be disposed while [sendVerificationEmail] is waiting for
+  /// a future to complete. This flag is used to inform the method that it
+  /// should terminate early.
+  bool _disposed = false;
+
   bool _isMobile(TargetPlatform platform) {
     return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
   }
@@ -92,6 +99,9 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
   /// Reloads firebase user and updates the [state].
   Future<void> reload() async {
     await user.reload();
+    if (_disposed) {
+      return;
+    }
 
     if (user.email == null) {
       value = EmailVerificationState.unresolved;
@@ -116,7 +126,15 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
     value = EmailVerificationState.sending;
     try {
       await user.sendEmailVerification(actionCodeSettings);
+      // Controller might be disposed while waiting for the future to complete.
+      // In this case, avoid updating its value, as it would cause an exception.
+      if (_disposed) {
+        return;
+      }
     } on Exception catch (e) {
+      if (_disposed) {
+        return;
+      }
       error = e;
       value = EmailVerificationState.failed;
       return;
@@ -133,15 +151,27 @@ class EmailVerificationController extends ValueNotifier<EmailVerificationState>
             final code = uri.queryParameters['oobCode'];
             if (code != null) {
               await auth.checkActionCode(code);
+              if (_disposed) {
+                return;
+              }
               await auth.applyActionCode(code);
+              if (_disposed) {
+                return;
+              }
               await user.reload();
+              if (_disposed) {
+                return;
+              }
               value = EmailVerificationState.verified;
               _linkSubscription?.cancel();
             }
           } on Exception catch (err) {
             error = err;
             value = EmailVerificationState.failed;
+          } finally {
+            // Ensure that the subscription is cancelled after processing the link.
             _linkSubscription?.cancel();
+            _linkSubscription = null;
           }
         },
         onError: (error) {
